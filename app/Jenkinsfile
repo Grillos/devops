@@ -1,0 +1,64 @@
+podTemplate(
+    containers: [
+        containerTemplate(args: 'cat', command: '/bin/sh -c', image: 'docker', livenessProbe: containerLivenessProbe(execArgs: '', failureThreshold: 0, initialDelaySeconds: 0, periodSeconds: 0, successThreshold: 0, timeoutSeconds: 0), name: 'docker-container', resourceLimitCpu: '', resourceLimitMemory: '', resourceRequestCpu: '', resourceRequestMemory: '', ttyEnabled: true, workingDir: '/home/jenkins/agent'),
+        containerTemplate(args: 'cat', command: '/bin/sh -c', image: 'lachlanevenson/k8s-helm:v2.11.0', name: 'helm-container',ttyEnabled: true)
+        ], 
+    volumes: [
+      hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock')
+    ],
+    label: 'app', 
+    name: 'app', 
+    namespace: 'devops') {
+        node('app') {
+            def REPOSITORY
+            def GIT_REPOSITORY_URI = "git@github.com:Grillos/devops.git"
+            def GIT_BRANCH
+            def REGISTRY_URI = "app.com.br"
+            def IMAGE_NAME = "app"
+            def IMAGE_TAG = "0.1.0"
+            def CHARTMUSEUM_URI = "http://chartmuseum-chartmuseum:8080"
+            def K8S_NAMESPACE
+            def HELM_CHART_NAME = "develop/app"
+            def HELM_DEPLOY_NAME = "app"
+
+            stage('checkout') {
+                echo 'Start checkout'
+                REPOSITORY = checkout scm
+                GIT_BRANCH = REPOSITORY.GIT_BRANCH
+                if(GIT_BRANCH.equals("master")){
+                    K8S_NAMESPACE = "production"
+                }
+                else if(GIT_BRANCH.equals("develop")){
+                    K8S_NAMESPACE = "develop"
+                }
+                else{
+                    def error = "Pipeline not exist's to branch ${GIT_BRANCH}"
+                    echo error
+                    throw new Exception(error)
+                }
+            }
+            stage('package') {
+                container('docker-container'){
+                    echo "Start create docker image"
+                    withCredentials([usernamePassword(credentialsId: 'registry', passwordVariable: 'REGISTRY_PASSWORD', usernameVariable: 'REGISTRY_USER')]) {
+                        sh "docker login -u ${REGISTRY_USER} -p ${REGISTRY_PASSWORD} ${REGISTRY_URI}"
+                        sh "docker build -t ${REGISTRY_URI}/${IMAGE_NAME}:${IMAGE_TAG} ."
+                        sh "docker push ${REGISTRY_URI}/${IMAGE_NAME}:${IMAGE_TAG}"
+                    }
+                }
+            }
+            stage('deploy') {
+            container('helm-container'){
+                echo "Start deploy with Helm"
+                sh "helm init --client-only"
+                sh "helm repo  add develop  ${CHARTMUSEUM_URI}"
+                sh "helm repo update"
+                try {
+                    sh "helm upgrade --namespace=${K8S_NAMESPACE} ${HELM_DEPLOY_NAME} ${HELM_CHART_NAME} --set image.tag=${IMAGE_TAG}"
+                }catch(Exception e){
+                    sh "helm install --namespace=${K8S_NAMESPACE} --name ${HELM_DEPLOY_NAME} ${HELM_CHART_NAME} --set image.tag=${IMAGE_TAG}"
+                }
+            }
+            }
+        }
+}
